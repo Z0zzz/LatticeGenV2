@@ -41,16 +41,12 @@ import inspect
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 logger = logging.get_logger(__name__)
 
-
-# class LatticeLlamaGenConfig(LlamaConfig):
-#     model_type = "latticegen_llama"
     
 class LatticeGenLlamaModel(LlamaModel):
     config_class = LlamaConfig
 
     def __init__(self, config: LlamaConfig):
         super(LatticeGenLlamaModel, self).__init__(config)
-
 
 class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
     config_class = LlamaConfig
