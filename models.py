@@ -3,8 +3,8 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from transformers import AutoConfig, AutoModelForCausalLM, \
-                         LlamaConfig, LlamaModel, LlamaForCausalLM, LlamaTokenizer
+from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM, \
+                         LlamaConfig, LlamaModel, LlamaForCausalLM, LlamaTokenizer, AutoModel
 from transformers.generation.configuration_utils import GenerationConfig
 
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -40,26 +40,26 @@ import copy
 import inspect
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 logger = logging.get_logger(__name__)
-
+print("importing LatticeGen...")
     
 class LatticeGenLlamaModel(LlamaModel):
     config_class = LlamaConfig
 
-    def __init__(self, config: LlamaConfig):
-        super(LatticeGenLlamaModel, self).__init__(config)
+    def __init__(self, config: AutoConfig):
+        super().__init__(config)
 
 class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
     config_class = LlamaConfig
 
     def __init__(self, config):
-        super(LlamaForCausalLM, self).__init__(config)
+        super().__init__(config)
         self.model = LatticeGenLlamaModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
-        self.tokenizer = LlamaTokenizer.from_pretrained("/home/gridsan/lumi/txml_shared/llama/llama/7B_hf")
-        self.prediction_token = self.tokenizer.encode("<predict>")[1]
-        
+        print("initialzing...")
+        # self.tokenizer = AutoTokenizer.from_pretrained("./base/llama/base_vanilla_tokenizer_hf")
+        # self.prediction_token = self.tokenizer.encode("<predict>")[1]
+        # self.bos_token = self.tokenizer.encode("<predict>")[0]  # hard code in the bos token, supposed to be the first token of every encoding operation 
         self.times = []
         self.generation_time = list()
         # Initialize weights and apply final processing
@@ -68,6 +68,15 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
     def get_model(self):
         return self.model
     
+    def set_tokenizer(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.prediction_token = self.tokenizer.encode("<predict>")[1]
+        self.bos_token = self.tokenizer.encode("<predict>")[0]
+        self.pad_token = self.tokenizer.encode("[PAD]")[1]
+        print("prediction token: ", self.prediction_token)
+        print("bos token: ", self.bos_token)
+        print("pad token: ", self.pad_token)
+
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -508,6 +517,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                 "`streamer` cannot be used with beam search (yet!). Make sure that `num_beams` is set to 1."
             )
 
+        '''
         if self.device.type != input_ids.device.type:
             warnings.warn(
                 "You are calling .generate() with the `input_ids` being on a device type different"
@@ -518,7 +528,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                 " running `.generate()`.",
                 UserWarning,
             )
-
+        '''
         # 8. prepare distribution pre_processing samplers
         logits_processor = self._get_logits_processor(
             generation_config=generation_config,
@@ -1045,7 +1055,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         import random
 
         self.past_key_values = None
-        self.noised_history = [2]*(ngram*n_noise_tokens)
+        self.noised_history = [self.bos_token]*(ngram*n_noise_tokens)
         self.sequence_idx_map = [list() for _ in range(n_noise_tokens)] # entry 0 is true sequence, the rest are noise sequences # random.choices(list( (ngram)), k=ngram)   # randonly setting bos tokens to be the true token
         self.true_sequence = []
         self.noise_sequences = [list() for _ in range(n_noise_tokens)]
@@ -1105,7 +1115,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                     repetition_penalty = repetition_penalty,
                 )
             else:
-                generation_mix_ratio = 0.1
+                generation_mix_ratio = 0.05
                 self.sample_noise_tokens(
                     input_ids[0,0],
                     time_step,
@@ -1136,7 +1146,6 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         import time
         start = time.time()
         # print("sample_noise_tokens, n_noise_tokens: ", n_noise_tokens, flush=True)
-        # get all combinations of the ngram history
         lattice_histories = []
         for i in range(-1, -1 * n_noise_tokens * ngram, -1 * n_noise_tokens):
             if i == -1: 
@@ -1145,11 +1154,10 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                 lattice_histories.append(self.noised_history[i-n_noise_tokens+1:i+1])  
         # reversing list of lists
         lattice_histories = lattice_histories[::-1]
-
-        combinations = [list(range(n_noise_tokens)) for _ in range(ngram)]
         cur_sequence_indices = dict()
         noised_histories = []
-
+        combinations = [list(range(n_noise_tokens)) for _ in range(ngram)]
+        
         for seq_idx, combination in enumerate(itertools.product(*combinations)):
             noised_lattice = []
             # keep track of which combination to sample noise/true token from
@@ -1165,7 +1173,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         for i in range(n_noise_tokens**ngram):
             seqs_to_process.append(self.noised_history + [self.prediction_token] + noised_histories[i])
         seqs_to_process = torch.tensor(seqs_to_process)
-        
+        # print(self.tokenizer.batch_decode(seqs_to_process)[:5])
         # save past key values to speed up generation
         # if is the very first sequence
         # total_num_sequences = n_noise_tokens ** ngram
@@ -1174,14 +1182,20 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         # output_logits = None
         # output_past_key_values = None
         # for batch in range(total_batches):
+        '''
+        outputs = self(
+                seqs_to_process.cuda(),
+                # past_key_values = self.past_key_values,
+            )
+        '''
         if seqs_to_process.shape[1] == (ngram*n_noise_tokens + 1 + ngram):
             outputs = self(
-                seqs_to_process,
+                seqs_to_process.to(self.device),
                 past_key_values = self.past_key_values,
             )
         else:
             outputs = self(
-                seqs_to_process[:,(-1*ngram-1 + -1*n_noise_tokens):],
+                seqs_to_process[:,(-1*ngram-1 + -1*n_noise_tokens):].to(self.device),
                 # seqs_to_process,
                 past_key_values = self.past_key_values,
             )
@@ -1209,6 +1223,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
             logits, 
             topk = 50, 
             repetition_penalty = repetition_penalty,
+            seen = seen, 
         )
 
         if is_prompt:
@@ -1225,20 +1240,26 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
             sample_mix_ratio = random.random()
             if sample_mix_ratio < mix_ratio:
                 # sampling from true sequence
+                print("sample from true sequence")
                 logits = outputs.logits[cur_sequence_indices[0]][-1].unsqueeze(dim=0)
                 next_noise_token = self.custom_sampling_topk(
-                    torch.tensor(self.noise_sequences[i]).unsqueeze(dim=0), 
+                    # torch.tensor(self.noise_sequences[i]).unsqueeze(dim=0), 
+                    torch.tensor(self.true_sequence).unsqueeze(dim=0),
                     logits, 
                     topk = 5, 
                     repetition_penalty = repetition_penalty,
+                    seen = seen,
                 )
+                '''
                 while next_noise_token in seen:
                     next_noise_token = self.custom_sampling_topk(
                         torch.tensor(self.true_sequence).unsqueeze(dim=0), 
                         logits, 
                         topk = noise_sample_topk,
                         repetition_penalty = repetition_penalty,
+                        seen = seen,
                     )
+                '''
             else:
                 # sampling from corresponding noise sequence
                 logits = outputs.logits[cur_sequence_indices[i]][-1].unsqueeze(dim=0)
@@ -1247,14 +1268,18 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                     logits, 
                     topk = 5, 
                     repetition_penalty = repetition_penalty,
-                )
-                while next_noise_token in seen:
-                    next_noise_token = self.custom_sampling_topk(
+                    seen = seen,
+                    )
+                # while next_noise_token in seen:
+                '''
+                next_noise_token = self.custom_sampling_topk(
                         torch.tensor(self.noise_sequences[i]).unsqueeze(dim=0), 
                         logits, 
                         topk = noise_sample_topk,
                         repetition_penalty = repetition_penalty,
+                        seen = seen,
                     )
+                '''
             current_lattice[i] = next_noise_token
             seen.append(next_noise_token)
             self.noise_sequences[i].append(next_noise_token)
@@ -1266,7 +1291,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
             self.sequence_idx_map[pair[0]].append(idx)
             next_lattice.append(pair[1])
         self.noised_history.extend(next_lattice)
-        print("self.noised_history: ", self.noised_history)
+        # print("self.noised_history: ", self.noised_history)
         end = time.time()
         if not is_prompt:
             self.generation_time.append(end - start)
@@ -1278,8 +1303,10 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
             next_token_logits,
             topk,
             repetition_penalty = 1,
+            seen = [],
         ):
 
+        input_ids = input_ids.to(self.device)
         self.config.pad_token_id = self.config.eos_token_id
         self.generation_config.pad_token_id = self.config.eos_token_id
 
@@ -1300,7 +1327,8 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                 TemperatureLogitsWarper(0.7),
             ]
         )
-
+        for idd in seen:
+            next_token_logits[0, idd.item()] = float("-inf")
         next_token_scores = logits_processor(input_ids, next_token_logits)
         next_token_scores = logits_warper(input_ids, next_token_scores)
         
@@ -1309,7 +1337,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
 
         return next_tokens
 
-    def generate_training_batch(self, inputs, ngram = 5, n_noise_toks = 3, nrepeats = 8):
+    def generate_training_batch(self, inputs, ngram = 4, n_noise_toks = 2, nrepeats = 8):
 
         # TODO: every sequence has 4 different seq_lens
         # TODO: debug bigram, then use all ngrams
@@ -1400,9 +1428,10 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         inputs, 
         ngram = 4, 
         n_noise_toks = 3, 
-        nrepeats = 8, 
+        nrepeats = 4,
+        force_batch = 1,
     ):
-        
+        print(f"generating parallel data training batch, ngram {ngram}, n={n_noise_toks}")
         import random
         noised_input_ids = []
         batch_labels = []
@@ -1417,7 +1446,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                 noised_inputs = []
                 labels = []
                 attention_mask = []
-
+                # print("generate_training_batch_parallel_datas: ", "sampling...")
                 for idx in range(seq_len):
                     token = input_ids[pairs[0], idx]
                     # if is start token, then the noise token(s) are all start tokens, device a set of ngram * n_noise_toks bos tokens
@@ -1447,7 +1476,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                     seq_to_append = input_ids[pairs[0], -1*cur_idx - ngram + 1: -1*cur_idx + 1]
                     noised_inputs.extend(seq_to_append)
                     
-                noised_inputs.append(1)
+                noised_inputs.append(self.pad_token)
                 labels.extend([-100]*(ngram+1))
                 labels.append(input_ids[pairs[0], idx+1])
                 attention_mask.extend([1]*(ngram+1))
@@ -1462,14 +1491,15 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         max_seq_len = max(list(map(len, noised_input_ids)))
         for i in range(b*nrepeats):
             batch_labels[i].extend([-100]*(max_seq_len - len(batch_labels[i])))
-            noised_input_ids[i].extend([1]*(max_seq_len - len(noised_input_ids[i])))
+            noised_input_ids[i].extend([self.pad_token]*(max_seq_len - len(noised_input_ids[i])))
             batch_attention_masks[i].extend([0]*(max_seq_len - len(batch_attention_masks[i])))
         
-        noised_inputs_to_return["input_ids"] = torch.tensor(noised_input_ids)
-        noised_inputs_to_return["attention_mask"] = torch.tensor(batch_attention_masks)
-        noised_inputs_to_return["labels"] = torch.tensor(batch_labels)
+        noised_inputs_to_return["input_ids"] = torch.tensor(noised_input_ids)[:force_batch*nrepeats].cuda()
+        noised_inputs_to_return["attention_mask"] = torch.tensor(batch_attention_masks)[:force_batch*nrepeats].cuda()
+        noised_inputs_to_return["labels"] = torch.tensor(batch_labels)[:force_batch*nrepeats].cuda()
 
-        # print(self.tokenizer.batch_decode(noised_inputs_to_return["input_ids"])[0])
+        print(self.tokenizer.batch_decode(noised_inputs_to_return["input_ids"])[0])
+        print(len(noised_inputs_to_return["input_ids"]))
         return noised_inputs_to_return
     
     @torch.no_grad()
@@ -1626,7 +1656,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
             starting_idx = ngram * n_noise_tokens
             recovered_tokens = 0
             # pad the beginning of the sequence with bos, this doesn't affect the outcome, just a convenient way to code
-            new_seq_to_process = [2] * ngram * (n_noise_tokens - round - 1)
+            new_seq_to_process = [self.bos_token] * ngram * (n_noise_tokens - round - 1)
             k = 1
             j = ngram * (n_noise_tokens - round)
             for i in range(starting_idx, seq_len, n_noise_tokens):
@@ -1659,7 +1689,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         print(f"RBS round {round + 1} recovery ratio: ", recovered_tokens/generated_seq_len)
         recovered_ratios[round+1] = recovered_tokens/generated_seq_len
         recovered_sequence = self.tokenizer.batch_decode(torch.tensor(seq_to_process).unsqueeze(dim=0))[0]
-        print("recovered sequence: ", recovered_sequence)
+        # print("recovered sequence: ", recovered_sequence)
         recovered_sequences.append(recovered_sequence)
         return recovered_ratios, recovered_sequences
     
@@ -1674,7 +1704,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         import torch.nn as nn
         m = nn.LogSoftmax(dim=0)
         input_ids = torch.tensor(input_ids).unsqueeze(dim=0)
-        true_sequence = [2]*ngram + self.true_sequence
+        true_sequence = [self.bos_token]*ngram + self.true_sequence
         seq_len = len(true_sequence)
         time_step = 0
 
@@ -1688,7 +1718,9 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                 else:
                     history.append(k.item())
             logits = self.timestep_logits[time_step][tuple(history)]
-            score += m(logits)[true_sequence[i+ngram]]
+            # print(m(logits).device)
+            # print(true_sequence)
+            score += m(logits)[true_sequence[i+ngram].cpu()]
             time_step += 1
         print("RBS sanity check score: ", score)
 
@@ -1696,7 +1728,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
     def beam_search_attack(
         self,
         input_ids: torch.LongTensor,
-        num_of_beams: Optional[int] = 100,
+        num_of_beams: Optional[int] = 50,
         ngram: Optional[int] = 4,
         n_noise_tokens: Optional[int] = 2,
     ):
@@ -1706,7 +1738,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         m = nn.LogSoftmax(dim=0)
         input_ids = torch.tensor(input_ids).unsqueeze(dim=0)
 
-        top_k_sequences = [[[2]*(ngram),0] for _ in range(1)]
+        top_k_sequences = [[[self.bos_token]*(ngram),0] for _ in range(1)]
 
         time_step = 0
         for i in range(ngram * n_noise_tokens, seq_len, n_noise_tokens):
@@ -1731,7 +1763,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
 
         top_k_sequences = sorted(temp_top_k_sequences, key=lambda x: x[1], reverse = True)[:num_of_beams]
 
-        print("recovered sequence length: ", len(top_k_sequences[0][0]))
+        # print("recovered sequence length: ", len(top_k_sequences[0][0]))
         recovered_sequence = self.tokenizer.batch_decode(torch.tensor(top_k_sequences[0][0]).unsqueeze(dim=0))[0]
         print("recovered sequence: ", recovered_sequence)
         print("score: ", top_k_sequences[0][1])
@@ -1797,7 +1829,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
             for z in range(100):
                 seq_recovered = top_k_sequences[z][0][(ngram-1):]
                 # print("score: ", top_k_sequences[z][1])
-                new_seq_to_process = [2] * ngram * (n_noise_tokens - round - 1)
+                new_seq_to_process = [self.bos_token] * ngram * (n_noise_tokens - round - 1)
                 k = 1
                 j = ngram * (n_noise_tokens - round)
                 recovered_tokens = 0
