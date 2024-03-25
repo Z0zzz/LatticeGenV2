@@ -1436,7 +1436,8 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
             seen.append(next_true_token)
 
         # sample noise tokens from synonyms and/or parallel data
-      
+        
+        ''' 
         # sample noise tokens, with mix ratio
         for i in range(1, n_noise_tokens):
             sample_mix_ratio = random.random()
@@ -1452,7 +1453,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                     repetition_penalty = repetition_penalty,
                     seen = seen,
                 )
-                '''
+                
                 while next_noise_token in seen:
                     next_noise_token = self.custom_sampling_topk(
                         torch.tensor(self.true_sequence).unsqueeze(dim=0), 
@@ -1461,7 +1462,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                         repetition_penalty = repetition_penalty,
                         seen = seen,
                     )
-                '''
+                
             else:
                 # sampling from corresponding noise sequence
                 logits = outputs.logits[cur_sequence_indices[i]][-1].unsqueeze(dim=0)
@@ -1473,7 +1474,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                     seen = seen,
                     )
                 # while next_noise_token in seen:
-                '''
+                
                 next_noise_token = self.custom_sampling_topk(
                         torch.tensor(self.noise_sequences[i]).unsqueeze(dim=0), 
                         logits, 
@@ -1482,6 +1483,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                         seen = seen,
                     )
                 '''
+
             current_lattice[i] = next_noise_token
             seen.append(next_noise_token)
             self.noise_sequences[i].append(next_noise_token)
