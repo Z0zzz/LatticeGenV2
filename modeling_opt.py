@@ -6281,6 +6281,7 @@ class OPTLatticeGenV2(OPTForCausalLM):
         n_noise_tokens: Optional[int] = 2,
         noise_sample_topk: Optional[int] = 5,
         mix_ratio: Optional[float] = 0.0,
+        noise_scheme: Optional[str] = "topk",
         inputs: Optional[torch.Tensor] = None,
         generation_config: Optional[GenerationConfig] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
@@ -6709,6 +6710,7 @@ class OPTLatticeGenV2(OPTForCausalLM):
                 noise_sample_topk=noise_sample_topk,
                 n_noise_tokens = n_noise_tokens,
                 mix_ratio = mix_ratio,
+                noise_scheme=noise_scheme,
                 logits_processor=logits_processor,
                 logits_warper=logits_warper,
                 stopping_criteria=stopping_criteria,
@@ -6942,6 +6944,7 @@ class OPTLatticeGenV2(OPTForCausalLM):
         ngram: Optional[int] = 2,
         n_noise_tokens: Optional[int] = 2,
         mix_ratio: Optional[int] = 0.0,
+        noise_scheme: Optional[str] = "topk",
         logits_processor: Optional[LogitsProcessorList] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
         logits_warper: Optional[LogitsProcessorList] = None,
@@ -7122,6 +7125,13 @@ class OPTLatticeGenV2(OPTForCausalLM):
         self.true_sequence = []
         self.noise_sequences = [list() for _ in range(n_noise_tokens)]
         self.timestep_logits = dict()   # dictionary of dictionaries, outer key is the integer from 0 to total_length - 1, indicating the timestep of taking the logit, inner key are the ngrams
+        if noise_scheme == "paralleldata":
+          self.noise_datas = []
+          for _ in range(1,n_noise_tokens):
+            # import pdb
+            # tttemp = self.dataset[random.randint(0, len(self.dataset)-1)]["input_ids"]
+            # pdb.set_trace()
+            self.noise_datas.append(self.dataset[random.randint(0, len(self.dataset)-1)]["input_ids"][1:])  # first token is bos
         time_step = 0
 
         bank = [list(range(n_noise_tokens)) for _ in range(ngram)]
@@ -7144,15 +7154,26 @@ class OPTLatticeGenV2(OPTForCausalLM):
                     repetition_penalty = repetition_penalty,
                 )
             else:
-                self.sample_noise_tokens(
-                    input_ids[0,i + 1],
-                    time_step, 
-                    ngram=ngram, 
-                    n_noise_tokens=n_noise_tokens,
-                    repetition_penalty = repetition_penalty,
-                    noise_sample_topk=noise_sample_topk,
-                    mix_ratio=mix_ratio,
-                )
+                if noise_scheme == "topk":
+                    self.sample_noise_tokens(
+                        input_ids[0,i + 1],
+                        time_step, 
+                        ngram=ngram, 
+                        n_noise_tokens=n_noise_tokens,
+                        repetition_penalty = repetition_penalty,
+                        noise_sample_topk=noise_sample_topk,
+                        mix_ratio=mix_ratio,
+                    )
+                elif noise_scheme == "paralleldata":
+                    self.sample_noise_tokens_synonym_and_paralleldata(
+                        input_ids[0,i + 1],
+                        time_step,
+                        ngram=ngram,
+                        n_noise_tokens=n_noise_tokens,
+                        repetition_penalty = repetition_penalty,
+                        noise_sample_topk=noise_sample_topk,
+                        mix_ratio=mix_ratio,
+                    )
             time_step += 1
             
         # auto-regressive generation with noise
@@ -7178,16 +7199,29 @@ class OPTLatticeGenV2(OPTForCausalLM):
                 )
             else:
                 generation_mix_ratio = 0.1
-                self.sample_noise_tokens(
-                    input_ids[0,0],
-                    time_step,
-                    ngram=ngram, 
-                    n_noise_tokens=n_noise_tokens,
-                    is_prompt = False,
-                    repetition_penalty = repetition_penalty,
-                    noise_sample_topk=noise_sample_topk,
-                    mix_ratio = generation_mix_ratio,
-                )
+                if noise_scheme == "topk":
+                    self.sample_noise_tokens(
+                        input_ids[0,0],
+                        time_step,
+                        ngram=ngram, 
+                        n_noise_tokens=n_noise_tokens,
+                        is_prompt = False,
+                        repetition_penalty = repetition_penalty,
+                        noise_sample_topk=noise_sample_topk,
+                        mix_ratio = generation_mix_ratio,
+                    )
+                elif noise_scheme == "paralleldata":
+                  self.sample_noise_tokens_synonym_and_paralleldata(
+                      input_ids[0,i + 1],
+                      time_step,
+                      ngram=ngram,
+                      is_prompt = False,
+                      n_noise_tokens=n_noise_tokens,
+                      repetition_penalty = repetition_penalty,
+                      noise_sample_topk=noise_sample_topk,
+                      mix_ratio=mix_ratio,
+                  )
+
             # print("generation content mix ratio: ", generation_mix_ratio)
             generation_count += 1
             time_step += 1
@@ -7500,6 +7534,126 @@ class OPTLatticeGenV2(OPTForCausalLM):
         if not is_prompt:
             self.generation_time.append(end - start)
 
+    
+    @torch.no_grad()
+    def sample_noise_tokens_synonym_and_paralleldata(
+        self,
+        input_id: torch.LongTensor,
+        time_step,
+        repetition_penalty: Optional[int] = 1,
+        ngram: Optional[int] = 2,
+        n_noise_tokens: Optional[int] = 2,
+        is_prompt: Optional[bool] = True,
+        noise_sample_topk: Optional[int] = 5,
+        mix_ratio: Optional[float] = 0.0,
+    ):
+        import itertools, random
+        import time
+        start = time.time()
+        # print("sample_noise_tokens, n_noise_tokens: ", n_noise_tokens, flush=True)
+        lattice_histories = []
+        for i in range(-1, -1 * n_noise_tokens * ngram, -1 * n_noise_tokens):
+            if i == -1:
+                lattice_histories.append(self.noised_history[i-n_noise_tokens+1:])
+            else:
+                lattice_histories.append(self.noised_history[i-n_noise_tokens+1:i+1])
+        # reversing list of lists
+        lattice_histories = lattice_histories[::-1]
+        cur_sequence_indices = dict()
+        noised_histories = []
+        combinations = [list(range(n_noise_tokens)) for _ in range(ngram)]
+
+        for seq_idx, combination in enumerate(itertools.product(*combinations)):
+            noised_lattice = []
+            # keep track of which combination to sample noise/true token from
+            for comb_idx, seq_comb in enumerate(self.sequence_idx_map):
+                seq = seq_comb[-1*ngram:]
+                if list(combination) == seq:
+                    cur_sequence_indices[comb_idx] = seq_idx
+            for history, token_idx in enumerate(combination):
+                noised_lattice.append(lattice_histories[history][token_idx])
+            noised_histories.append(noised_lattice)
+
+        seqs_to_process = []
+        for i in range(n_noise_tokens**ngram):
+            seqs_to_process.append(self.noised_history + [self.prediction_token] + noised_histories[i])
+        seqs_to_process = torch.tensor(seqs_to_process)
+
+        if seqs_to_process.shape[1] == (ngram*n_noise_tokens + 1 + ngram):
+            outputs = self(
+                seqs_to_process.to(self.device),
+                past_key_values = self.past_key_values,
+            )
+        else:
+            outputs = self(
+                seqs_to_process[:,(-1*ngram-1 + -1*n_noise_tokens):].to(self.device),
+                # seqs_to_process,
+                past_key_values = self.past_key_values,
+            )
+
+        self.past_key_values = tuple(tuple(tensor[:, :, :-1*ngram-1, :] for tensor in inner_tuple) for inner_tuple in outputs.past_key_values)
+
+        # saving the ngram history for beam search
+        self.timestep_logits[time_step] = self.timestep_logits.get(time_step, dict())
+        for history_idx in range(n_noise_tokens**ngram):
+            key = []
+            for k in noised_histories[history_idx][-1*ngram:]:
+                if type(k) == int:
+                    key.append(k)
+                else:
+                    key.append(k.item())
+            self.timestep_logits[time_step][tuple(key)] = outputs.logits[history_idx][-1].cpu()
+
+        seen = []
+        # sample next true token
+        logits = outputs.logits[cur_sequence_indices[0]][-1].unsqueeze(dim=0)
+        # import pdb
+        # pdb.set_trace()
+        current_lattice = dict()
+        input_id = input_id.unsqueeze(dim=0)
+        
+        next_true_token = self.custom_sampling_topk(
+            torch.tensor(self.true_sequence).unsqueeze(dim=0),
+            logits,
+            topk = 50,
+            repetition_penalty = repetition_penalty,
+            seen = seen,
+        )
+
+        if is_prompt:
+            self.true_sequence.append(input_id)
+            current_lattice[0] = input_id
+            seen.append(input_id)
+        else:
+            current_lattice[0] = next_true_token
+            self.true_sequence.append(next_true_token)
+            seen.append(next_true_token)
+
+        token = current_lattice[0]
+        results = self.vdb[int(token)]
+        choices = list(range(10,20))
+        for k in range(1,n_noise_tokens):
+            choice = random.choice(choices)
+            next_noise_token = int(results[choice])
+            while next_noise_token == self.prediction_token:
+                choice = random.choice(choices)
+                next_noise_token = int(results[choice])
+            current_lattice[k] = next_noise_token
+            choices.remove(choice)
+            self.noise_sequences[k].append(next_noise_token)
+
+        current_lattice_items = list(current_lattice.items())
+        random.shuffle(current_lattice_items)
+        next_lattice = []
+        for idx, pair in enumerate(current_lattice_items):
+            self.sequence_idx_map[pair[0]].append(idx)
+            next_lattice.append(pair[1])
+        self.noised_history.extend(next_lattice)
+        # print("self.noised_history: ", self.noised_history)
+        end = time.time()
+        if not is_prompt:
+            self.generation_time.append(end - start)
+    
     @torch.no_grad()
     def custom_sampling_topk(
             self, 
