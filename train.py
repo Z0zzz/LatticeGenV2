@@ -42,6 +42,10 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from custom_datasets.custom_datasets import WritingPromptsDataset, WritingPromptsParellelNoiseDataset
 
+import peft
+from peft import LoraConfig, TaskType
+from peft import get_peft_model
+
 import transformers
 from transformers import (
     CONFIG_MAPPING,
@@ -55,8 +59,8 @@ from transformers import (
 )
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
-
 from transformers import OPTLatticeGenV2
+from models import LatticeGenLlamaForCausalLM
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.36.0.dev0")
@@ -343,9 +347,10 @@ def main():
     #
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
+    '''
     if args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name)
+        raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name, download_mode='force_redownload')
         if "validation" not in raw_datasets.keys():
             raw_datasets["validation"] = load_dataset(
                 args.dataset_name,
@@ -383,7 +388,7 @@ def main():
                 split=f"train[{args.validation_split_percentage}%:]",
                 **dataset_args,
             )
-
+    '''
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
@@ -421,18 +426,60 @@ def main():
     
     if args.model_name_or_path == "lattice-opt1.3b":
         # model with additional token <predict>
-        model = OPTLatticeGenV2.from_pretrained("tmp/base-opt1.3b-model")
-        tokenizer = AutoTokenizer.from_pretrained("tmp/base-opt1.3b-tokenizer")
+        model = OPTLatticeGenV2.from_pretrained("opt-models/base-opt1.3b-model")
+        tokenizer = AutoTokenizer.from_pretrained("opt-models/base-opt1.3b-tokenizer")
         # print("#"*100)
         config = AutoConfig.from_pretrained(
-            "tmp/base-opt1.3b-model",
+            "opt-models/base-opt1.3b-model",
             trust_remote_code=args.trust_remote_code,
         )
         config.vocab_size = 50266
         # print("#"*100)
         # print(config)
         # print("#"*100)
+    elif args.model_name_or_path == "llama2-7b":
+        peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM, inference_mode=False, r=64, lora_alpha=128, lora_dropout=0.0, target_modules=["embed_tokens", "lm_head", "q_proj", "v_proj"])
+        model_path = "base/llama"
+        # model = LatticeGenLlamaForCausalLM.from_pretrained(model_path+"/base_vanilla_model_hf", device_map='auto', torch_dtype=torch.bfloat16, trust_remote_code=True)
+        
+        # model = get_peft_model(model, peft_config)
+        # model.print_trainable_parameters()
+
+        # tokenizer = AutoTokenizer.from_pretrained(model_path+"/base_vanilla_tokenizer_hf", trust_remote_code = True)
+        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", trust_remote_code=True, additional_special_tokens=["<predict>"])
+        if tokenizer.pad_token is None:
+            tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+                    
+        model = LatticeGenLlamaForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf", device_map='auto', torch_dtype=torch.bfloat16, trust_remote_code=True)
+        model.set_tokenizer(tokenizer)
+        model.resize_token_embeddings(len(tokenizer)) 
+        model = get_peft_model(model, peft_config)
+        model.print_trainable_parameters()
+        print(model)
+
+        # config = AutoConfig.from_pretrained("meta-llama/Llama-2-7b-hf", trust_remote_code=True)
+        # config.vocab_size = len(tokenizer)
+    elif args.model_name_or_path == "llama2-orig":
+        peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM, inference_mode=False, r=64, lora_alpha=128, lora_dropout=0.0, target_modules=["lm_head", "q_proj", "v_proj"])
+        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf", device_map='auto', torch_dtype=torch.bfloat16, trust_remote_code=True)
+        model.resize_token_embeddings(len(tokenizer))
+        model = get_peft_model(model, peft_config)
+        model.print_trainable_parameters()
+        print(model)
+        
     elif args.model_name_or_path:
+        config = AutoConfig.from_pretrained(
+            args.model_name_or_path,
+            trust_remote_code=args.trust_remote_code,
+        )
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_name_or_path, use_fast=not args.use_slow_tokenizer, trust_remote_code=args.trust_remote_code
+        )
+
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
@@ -447,14 +494,18 @@ def main():
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
+    '''
     embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
         model.resize_token_embeddings(len(tokenizer))
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({'pad_token': '[PAD]'})
         model.resize_token_embeddings(len(tokenizer))
+    '''
     # Preprocessing the datasets.
     # First we tokenize all the texts.
+    
+    '''
     column_names = raw_datasets["train"].column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
 
@@ -502,14 +553,14 @@ def main():
         }
         result["labels"] = result["input_ids"].copy()
         return result
-
+    '''
     # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a remainder
     # for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value might be slower
     # to preprocess.
     #
     # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
     # https://huggingface.co/docs/datasets/process#map
-
+    '''
     with accelerator.main_process_first():
         lm_datasets = tokenized_datasets.map(
             group_texts,
@@ -521,11 +572,11 @@ def main():
 
     train_dataset = lm_datasets["train"]
     eval_dataset = lm_datasets["validation"]
-
+    
     # Log a few random samples from the training set:
     for index in random.sample(range(len(train_dataset)), 3):
         logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
-
+    '''
     # if args.parallel_data:
     #     train_dataset = WritingPromptsParellelNoiseDataset(tokenizer, args.block_size, "train",size=10000)
     #     eval_dataset = WritingPromptsParellelNoiseDataset(tokenizer, args.block_size, "valid", size=500)
@@ -577,7 +628,7 @@ def main():
     # On TPU, the tie weights in our model have been disconnected, so we need to restore the ties.
     if accelerator.distributed_type == DistributedType.TPU:
         model.tie_weights()
-
+    
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
@@ -654,7 +705,9 @@ def main():
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
         else:
             active_dataloader = train_dataloader
-        print(model)
+        import pdb
+        # pdb.set_trace()
+        # print(model)
         train_losses = []
         for step, batch in enumerate(active_dataloader):
             with accelerator.accumulate(model):
@@ -665,10 +718,13 @@ def main():
                 elif "lattice" in args.model_name_or_path:
                     new_batch = model.generate_training_batch(batch)
                 else:
-                    new_batch = batch
+                    new_batch = {k:v.to(torch.int64) for k,v in batch.items()}
+                # pdb.set_trace()
                 outputs = model(**new_batch)
+                # pdb.set_trace()
+                # print(outputs)
                 loss = outputs.loss
-                train_losses.append(loss)
+                train_losses.append(loss.detach().cpu())
                 if step % 10 == 0:
                     print("checkpoint step loss: ", sum(train_losses)/len(train_losses), flush=True)
                     train_losses = []
@@ -709,7 +765,7 @@ def main():
                         elif "lattice" in args.model_name_or_path:
                             new_batch = model.generate_training_batch(batch)
                         else:
-                            new_batch = batch
+                            new_batch = {k:v.to(torch.int64) for k,v in batch.items()}
                         outputs = model(**new_batch)
 
                     loss = outputs.loss
@@ -748,7 +804,7 @@ def main():
                 elif "lattice" in args.model_name_or_path:
                     new_batch = model.generate_training_batch(batch)
                 else:
-                    new_batch = batch
+                    new_batch = {k:v.to(torch.int64) for k,v in batch.items()}
                 outputs = model(**new_batch)
 
             loss = outputs.loss

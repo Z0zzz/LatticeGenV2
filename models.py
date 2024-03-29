@@ -55,9 +55,14 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
 
     def __init__(self, config):
         super().__init__(config)
+        import pickle
         self.model = LatticeGenLlamaModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        
+        dbfile = open("./vdbs/llama_vdb_extended.pickle", "rb")
+        self.vdb = pickle.load(dbfile)
+
         print("initialzing...")
         # self.tokenizer = AutoTokenizer.from_pretrained("./base/llama/base_vanilla_tokenizer_hf")
         # self.prediction_token = self.tokenizer.encode("<predict>")[1]
@@ -76,7 +81,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         self.bos_token = self.tokenizer.encode("<predict>")[0]
         self.pad_token = self.tokenizer.encode("[PAD]")[1]
         
-        self.dataset = WritingPromptsDataset(tokenizer, 32, "train", size=1000)
+        self.dataset = WritingPromptsDataset(tokenizer, 300, "train", size=1000)
       
         print("prediction token: ", self.prediction_token)
         print("bos token: ", self.bos_token)
@@ -1070,8 +1075,12 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         self.timestep_logits = dict()   # dictionary of dictionaries, outer key is the integer from 0 to total_length - 1, indicating the timestep of taking the logit, inner key are the ngrams
         if noise_scheme == "paralleldata":
           self.noise_datas = []
-          for kkkkkk in range(1,n_noise_tokens):
+          for _ in range(1,n_noise_tokens):
+            # import pdb
+            # tttemp = self.dataset[random.randint(0, len(self.dataset)-1)]["input_ids"]
+            # pdb.set_trace()
             self.noise_datas.append(self.dataset[random.randint(0, len(self.dataset)-1)]["input_ids"][1:])  # first token is bos
+
         time_step = 0
 
         bank = [list(range(n_noise_tokens)) for _ in range(ngram)]
@@ -1155,6 +1164,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                       input_ids[0,i + 1],
                       time_step, 
                       ngram=ngram, 
+                      is_prompt = False,
                       n_noise_tokens=n_noise_tokens,
                       repetition_penalty = repetition_penalty,
                       noise_sample_topk=noise_sample_topk,
@@ -1451,8 +1461,12 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         seen = []
         # sample next true token
         logits = outputs.logits[cur_sequence_indices[0]][-1].unsqueeze(dim=0)
+        # import pdb
+        # pdb.set_trace()
         current_lattice = dict()
         input_id = input_id.unsqueeze(dim=0)
+        # print(self.tokenizer.batch_decode(torch.tensor(self.true_sequence).unsqueeze(dim=0)))
+        # print(self.tokenizer.batch_decode(torch.tensor(self.noise_sequences[1]).unsqueeze(dim=0)))
         next_true_token = self.custom_sampling_topk(
             torch.tensor(self.true_sequence).unsqueeze(dim=0), 
             logits, 
@@ -1460,7 +1474,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
             repetition_penalty = repetition_penalty,
             seen = seen, 
         )
-
+        # pdb.set_trace() 
         if is_prompt:
             self.true_sequence.append(input_id)
             current_lattice[0] = input_id 
@@ -1469,14 +1483,30 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
             current_lattice[0] = next_true_token
             self.true_sequence.append(next_true_token)
             seen.append(next_true_token)
-
-        # sample noise tokens from synonyms and/or parallel data
-        for i in range(1, n_noise_tokens):
-          next_noise_token = self.noise_datas[i][time_step]
+        
+        '''
+        # sample noise tokens from parallel data
+        for i in range(1, n_noise_tokens):  
+          # next_noise_token = self.noise_datas[i-1][time_step]
+          next_noise_token = self.true_sequence[-1]
           current_lattice[i] = next_noise_token
           seen.append(next_noise_token)
           self.noise_sequences[i].append(next_noise_token)
-
+        '''
+        
+        token = current_lattice[0]
+        results = self.vdb[int(token)]
+        choices = list(range(10,20))
+        for k in range(1,n_noise_tokens):
+            choice = random.choice(choices)
+            next_noise_token = int(results[choice])
+            while next_noise_token == self.prediction_token:
+                choice = random.choice(choices)
+                next_noise_token = int(results[choice])
+            current_lattice[k] = next_noise_token
+            choices.remove(choice)
+            self.noise_sequences[k].append(next_noise_token)
+        
         current_lattice_items = list(current_lattice.items())
         random.shuffle(current_lattice_items)
         next_lattice = []
@@ -1579,8 +1609,8 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
     def generate_training_batch_parallel_datas(
         self, 
         inputs, 
-        ngram = 4, 
-        n_noise_toks = 3, 
+        ngram = 2, 
+        n_noise_toks = 2, 
         nrepeats = 4,
         force_batch = 1,
     ):
