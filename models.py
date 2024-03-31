@@ -40,6 +40,10 @@ import copy
 import inspect
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 from custom_datasets.custom_datasets import DailyDialogueDataset, WritingPromptsDataset, WritingPromptsDatasetExampleGeneration
+import random
+
+torch.manual_seed(10)
+random.seed(10)
 
 logger = logging.get_logger(__name__)
 print("importing LatticeGen...")
@@ -69,6 +73,8 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         # self.bos_token = self.tokenizer.encode("<predict>")[0]  # hard code in the bos token, supposed to be the first token of every encoding operation   
         self.times = []
         self.generation_time = list()
+        # torch.manual_seed(10)
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -229,6 +235,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         noise_sample_topk: Optional[int] = 5,
         mix_ratio: Optional[float] = 0.0,
         noise_scheme: Optional[str] = "topk",
+        allow_repeat_positions: Optional[list] = [],
         inputs: Optional[torch.Tensor] = None,
         generation_config: Optional[GenerationConfig] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
@@ -659,6 +666,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                 n_noise_tokens = n_noise_tokens,
                 mix_ratio = mix_ratio,
                 noise_scheme = noise_scheme,
+                allow_repeat_positions = allow_repeat_positions,
                 logits_processor=logits_processor,
                 logits_warper=logits_warper,
                 stopping_criteria=stopping_criteria,
@@ -893,6 +901,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         n_noise_tokens: Optional[int] = 2,
         mix_ratio: Optional[int] = 0.0,
         noise_scheme: Optional[str] = "topk",
+        allow_repeat_positions: Optional[list] = [],
         logits_processor: Optional[LogitsProcessorList] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
         logits_warper: Optional[LogitsProcessorList] = None,
@@ -1065,7 +1074,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         this_peer_finished = False  # used by synced_gpus only
 
         # define variables to keep track of history of generation
-        import random
+        # import random
 
         self.past_key_values = None
         self.noised_history = [self.bos_token]*(ngram*n_noise_tokens)
@@ -1073,6 +1082,8 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         self.true_sequence = []
         self.noise_sequences = [list() for _ in range(n_noise_tokens)]
         self.timestep_logits = dict()   # dictionary of dictionaries, outer key is the integer from 0 to total_length - 1, indicating the timestep of taking the logit, inner key are the ngrams
+        self.allow_repeat_positions = allow_repeat_positions
+        self.allow_repeat_tokens = list()
         if noise_scheme == "paralleldata":
           self.noise_datas = []
           for _ in range(1,n_noise_tokens):
@@ -1082,7 +1093,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
             self.noise_datas.append(self.dataset[random.randint(0, len(self.dataset)-1)]["input_ids"][1:])  # first token is bos
 
         time_step = 0
-
+        
         bank = [list(range(n_noise_tokens)) for _ in range(ngram)]
         for k1 in range(n_noise_tokens):
             sequence = []
@@ -1282,9 +1293,11 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         # sample noise tokens, with mix ratio
         for i in range(1, n_noise_tokens):
             sample_mix_ratio = random.random()
-            if sample_mix_ratio < mix_ratio:
+            if sample_mix_ratio < mix_ratio and time_step not in self.allow_repeat_positions:
                 # sampling from true sequence
                 print("sample from true sequence")
+                print("time step: ", time_step)
+                
                 logits = outputs.logits[cur_sequence_indices[0]][-1].unsqueeze(dim=0)
                 next_noise_token = self.custom_sampling_topk(
                     # torch.tensor(self.noise_sequences[i]).unsqueeze(dim=0), 
@@ -1294,6 +1307,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                     repetition_penalty = repetition_penalty,
                     seen = seen,
                 )
+                print("noise token: ", self.tokenizer.decode(next_noise_token.item()))
                 '''
                 while next_noise_token in seen:
                     next_noise_token = self.custom_sampling_topk(
@@ -1304,7 +1318,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                         seen = seen,
                     )
                 '''
-            else:
+            elif sample_mix_ratio >= mix_ratio and time_step not in self.allow_repeat_positions:
                 # sampling from corresponding noise sequence
                 logits = outputs.logits[cur_sequence_indices[i]][-1].unsqueeze(dim=0)
                 next_noise_token = self.custom_sampling_topk(
@@ -1324,6 +1338,12 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
                         seen = seen,
                     )
                 '''
+            else:   # if time_step in allow_repeat_positions
+                # import pdb
+                # pdb.set_trace()
+                next_noise_token = input_id.squeeze(dim=0)
+                self.allow_repeat_tokens.append(next_noise_token)
+
             current_lattice[i] = next_noise_token
             seen.append(next_noise_token)
             self.noise_sequences[i].append(next_noise_token)
@@ -1526,7 +1546,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         # TODO: debug bigram, then use all ngrams
         # TODO: add more bos at the start accordingly based on what ngram
 
-        import random
+        #  import random
         input_ids = inputs["input_ids"]
         b, orig_seq_len = input_ids.shape
         # self.noise_magnitude = n**2*2
@@ -1615,7 +1635,7 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
         force_batch = 1,
     ):
         print(f"generating parallel data training batch, ngram {ngram}, n={n_noise_toks}")
-        import random
+        # import random
         noised_input_ids = []
         batch_labels = []
         batch_attention_masks = []
@@ -1842,18 +1862,36 @@ class LatticeGenLlamaForCausalLM(LlamaForCausalLM):
             new_seq_to_process = [self.bos_token] * ngram * (n_noise_tokens - round - 1)
             k = 1
             j = ngram * (n_noise_tokens - round)
+            print("sequence length: ", seq_len)
+            time_step = 0
+            # import pdb
+            # pdb.set_trace()
             for i in range(starting_idx, seq_len, n_noise_tokens):
                 recovered_tok = seq_recovered[k]
                 true_tok = input_ids[i + true_seq_idx_map[k]]
+                # print("###")
                 for _ in range(n_noise_tokens - round):
                     cur_lattice_tok = seq_to_process[j]
-                    if recovered_tok != cur_lattice_tok:
+                    # print(self.allow_repeat_tokens)
+                    # print(cur_lattice_tok)
+                    if time_step in self.allow_repeat_positions:
+                        # print(1)
+                        recovered_tokens += 1
+                        j += (n_noise_tokens - round)
+                        new_seq_to_process.extend([cur_lattice_tok]*(n_noise_tokens - round - 1))
+                        break
+                    elif recovered_tok != cur_lattice_tok:
+                        # print(2)
                         new_seq_to_process.append(cur_lattice_tok)
                     else:
+                        # print(3)
                         if recovered_tok == true_tok:
                             recovered_tokens += 1
                     j += 1
+                # print(j)
+                # print("###")
                 k += 1
+                time_step += 1
             print(f"RBS round {round + 1} recovery ratio: ", recovered_tokens/generated_seq_len)
             print("filtered sequence length: ", len(new_seq_to_process))
             seq_to_process = new_seq_to_process[:]

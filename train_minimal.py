@@ -32,15 +32,16 @@ from transformers import (
 )
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
+from accelerate import Accelerator
 
-from transformers import OPTLatticeGenV2
+from models import LatticeGenLlamaForCausalLM 
 import torch
 # from transformers import OPTForCausalLM, AutoTokenizer
 from custom_datasets.custom_datasets import DailyDialogueDataset, WritingPromptsDataset, WritingPromptsParellelNoiseDataset
 import pdb
 
 device = "cuda" # the device to load the model onto
-block_size = 128
+block_size = 30
 trust_remote_code = False
 per_device_train_batch_size = 4
 per_device_eval_batch_size = 4
@@ -51,14 +52,13 @@ learning_rate = 5e-5
 num_warmup_steps = 0
 gradient_accumulation_steps = 1
 
-model = OPTLatticeGenV2.from_pretrained("tmp/base-opt1.3b-model").cuda()
-tokenizer = AutoTokenizer.from_pretrained("tmp/base-opt1.3b-tokenizer")
+model_path = "base/llama"
+model = LatticeGenLlamaForCausalLM.from_pretrained(model_path+"/base_model", device_map='auto', torch_dtype=torch.bfloat16, trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(model_path+"/base_tokenizer", trust_remote_code = True)
+config = AutoConfig.from_pretrained("meta-llama/Llama-2-7b-chat-hf", trust_remote_code=True)
+config.vocab_size = 32001
+# accelerator = Accelerator()
 
-config = AutoConfig.from_pretrained(
-    "tmp/base-opt1.3b-model",
-    trust_remote_code=trust_remote_code,
-)
-config.vocab_size = 50266
 
 embedding_size = model.get_input_embeddings().weight.shape[0]
 if len(tokenizer) > embedding_size:
@@ -69,7 +69,7 @@ if tokenizer.pad_token is None:
 train_dataset = WritingPromptsDataset(tokenizer, block_size, "train",size=10000)
 eval_dataset = WritingPromptsDataset(tokenizer, block_size, "valid", size=500)
 print(train_dataset[0])
-pdb.set_trace()
+# pdb.set_trace()
 train_dataloader = DataLoader(
         train_dataset, shuffle=True, collate_fn=default_data_collator, batch_size=per_device_train_batch_size
     )
@@ -80,7 +80,6 @@ eval_dataloader = DataLoader(
 
 num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
 max_train_steps = num_train_epochs * num_update_steps_per_epoch
-
 
 
 no_decay = ["bias", "layer_norm.weight"]
@@ -101,10 +100,14 @@ lr_scheduler = get_scheduler(
         num_warmup_steps=num_warmup_steps * gradient_accumulation_steps,
         num_training_steps=max_train_steps * gradient_accumulation_steps,
     )
+
+# train_dataloader, model, optimizer = accelerator.prepare(train_dataloader, model, optimizer)
+
 progress_bar = tqdm(range(max_train_steps))
 starting_epoch = 0
-
-pdb.set_trace()
+import os
+print(os.system("nvidia-smi"))
+# pdb.set_trace()
 for epoch in range(starting_epoch, num_train_epochs):
     model.train()
 
@@ -115,8 +118,8 @@ for epoch in range(starting_epoch, num_train_epochs):
     train_losses = []
     for step, batch in enumerate(active_dataloader):
         new_batch = model.generate_training_batch_parallel_datas(batch)
-        
-        # pdb.set_trace()
+        print(os.system("nvidia-smi"))
+        pdb.set_trace()
         outputs = model(**new_batch)
         loss = outputs.loss
         train_losses.append(loss.detach().cpu())
@@ -124,8 +127,10 @@ for epoch in range(starting_epoch, num_train_epochs):
             print("checkpoint step loss: ", sum(train_losses)/len(train_losses), flush=True)
             train_losses = []
         # We keep track of the loss at each epoch
-        pdb.set_trace()
+        # pdb.set_trace()
+        print(os.system("nvidia-smi"))
         loss.backward()
+        # accelerator.backward(loss)
         optimizer.step()
         lr_scheduler.step()
         optimizer.zero_grad()

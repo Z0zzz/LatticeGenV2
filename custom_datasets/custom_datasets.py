@@ -1,6 +1,6 @@
 import torch
 from transformers import AutoTokenizer
-tokenizer = AutoTokenizer.from_pretrained("facebook/opt-1.3b")
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from transformers import default_data_collator
@@ -47,17 +47,18 @@ class DailyDialogueDataset(torch.utils.data.Dataset):
 #     with open("./writingPrompts/" + name + ".wp_target") as f:
 #         stories1 = f.readlines()
 #     stories1 = [" ".join(i.split()[0:1000]) for i in stories1]
+datapath = '/gscratch/argon/tianxing/projects/michael/LatticeGenV2/custom_datasets/writingPrompts/'
 
 class WritingPromptsDataset(torch.utils.data.Dataset):
 
     def __init__(self, tokenizer, max_length, split, size = 2000, idx_start = 0):
         self.tokenizer = tokenizer
         self.split = split
-        with open("/home/gridsan/groups/txml/michael/LatticeGenV2/custom_datasets/writingPrompts/" + split + ".wp_source") as f:
+        with open(datapath + split + ".wp_source") as f:
             stories = f.readlines()
         self.prompt = [" ".join(i.split()[:]) for i in stories][idx_start:min(size,len(stories))]
 
-        with open("/home/gridsan/groups/txml/michael/LatticeGenV2/custom_datasets/writingPrompts/" + split + ".wp_target") as f:
+        with open(datapath + split + ".wp_target") as f:
             stories = f.readlines()
         self.story = [" ".join(i.split()[:]) for i in stories][idx_start:min(size,len(stories))]
 
@@ -72,7 +73,7 @@ class WritingPromptsDataset(torch.utils.data.Dataset):
             sample = self.tokenizer(text, return_tensors="pt")
         else:
             text = f"Prompt: {prompt[7:]}. Story: {story}"
-            sample = self.tokenizer(text, padding='max_length', truncation=True, max_length=self.max_length)
+            sample = self.tokenizer(text, return_token_type_ids=False, padding='max_length', truncation=True, max_length=self.max_length)
             # delete bos token which is added back when generating noised input for training
             sample["input_ids"] = sample["input_ids"]
             sample["attention_mask"] = sample["attention_mask"]
@@ -225,12 +226,13 @@ class WritingPromptsDatasetExampleGeneration(torch.utils.data.Dataset):
         #     stories = f.readlines()
         # self.story = [" ".join(i.split()[0:300]) for i in stories][idx_start:size]
         # self.prompt = ["Aliens start abducting humans", "The scientists have discovered something terrible.", "The silence before the storm comes"]
-        self.prompt = ["Aliens have arrived, and ask for a single human to plead humanity's case and save them from extinction. The human is selected through a lottery of the entire human race, and on the day of the drawing, your name is picked.."]
+        self.prompt = [
+                "Aliens have arrived, and ask for a single human to plead humanity's case and save them from extinction. The human is selected through a lottery of the entire human race, and on the day of the drawing, your name is picked..", "Every planet in our solar system has a `` champion '' being that takes on the attributes of the planet itself. The `` champion '' from the sun has created an army to destroy the planets and the 8 ( or 9 ) champions must save the solar system..", "As a Space marine you have an allowance of one call home a day. Today's battle was especially bad and your best friend died I'm the heat of it all. Time to call home.."]
         self.max_length = max_length
 
     def __getitem__(self, idx):
 
-        prompt = self.prompt[0].replace("<newline>", "")
+        prompt = self.prompt[idx].replace("<newline>", "")
         # story = self.story[idx].replace("<newline>", "")
         text = f"Prompt: {prompt}. Story:"
         sample = self.tokenizer(text, return_tensors="pt")
