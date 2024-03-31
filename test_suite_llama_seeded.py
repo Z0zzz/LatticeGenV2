@@ -184,8 +184,8 @@ def main():
     
     
     
-    test_dataset = WritingPromptsDataset(tokenizer, 32, "test", size=size)
-    # test_dataset = WritingPromptsDatasetExampleGeneration(tokenizer, 32, "test", size=size)
+    # test_dataset = WritingPromptsDataset(tokenizer, 32, "test", size=size)
+    test_dataset = WritingPromptsDatasetExampleGeneration(tokenizer, 32, "test", size=size)
     # import pdb
     # pdb.set_trace()
     repetition_list = {}
@@ -226,8 +226,8 @@ def main():
                     continue
                 for key, _ in text.items():
                     text[key] = text[key].to(device)
-                if i > size: break
-                for jj in range(1):
+                if i > 150: break
+                for jj in range(len(seeds)):
 
                     torch.manual_seed(seeds[jj])
                     np.random.seed(seeds[jj])
